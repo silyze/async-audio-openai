@@ -52,7 +52,7 @@ function getOpenAiUrl(model?: string) {
   return url;
 }
 
-export class OpenAiStream implements AudioStream {
+export default class OpenAiStream implements AudioStream {
   #transform: AsyncTransform<JsonValue>;
   #stream: AsyncStream<JsonValue>;
 
