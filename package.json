@@ -1,6 +1,6 @@
 {
   "name": "@silyze/async-audio-openai",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "OpenAI real-time conversations implementation using @silyze/async-audio-stream",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -26,7 +26,7 @@
     "@mojsoski/assert": "^1.0.0",
     "@mojsoski/async-stream": "^1.0.0",
     "@mojsoski/async-websocket-stream": "^1.0.2",
-    "@silyze/async-audio-format-ulaw": "^1.0.0",
+    "@silyze/async-audio-format-ulaw": "^1.0.1",
     "@silyze/async-audio-stream": "^1.0.1",
     "@silyze/async-openai-function-stream": "^1.0.0",
     "ws": "^8.18.2"
