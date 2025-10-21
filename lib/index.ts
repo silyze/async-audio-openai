@@ -44,6 +44,10 @@ export type OpenAiSessionConfig = {
   functions?: FunctionTool[];
 };
 
+export interface ILogOptions {
+  log(area: string, message: string, extra?: object): void;
+}
+
 const OPENAI_WS_URL = `wss://api.openai.com/v1/realtime`;
 function getOpenAiUrl(model?: string) {
   const url = new URL(OPENAI_WS_URL);
@@ -222,6 +226,7 @@ export default class OpenAiStream implements AudioStream {
   #stream: AsyncStream<JsonValue>;
 
   #socket?: WebSocket;
+  #logOptions?: ILogOptions;
 
   #tts?: TextToSpeachModel;
 
@@ -236,10 +241,15 @@ export default class OpenAiStream implements AudioStream {
   #ttsSpeakQueue: Promise<void> = Promise.resolve();
   #userSpeaking = false;
 
-  constructor(stream: AsyncStream<JsonValue>, socket?: WebSocket) {
+  constructor(
+    stream: AsyncStream<JsonValue>,
+    socket?: WebSocket,
+    logOptions?: ILogOptions
+  ) {
     this.#transform = stream.transform();
     this.#stream = stream;
     this.#socket = socket;
+    this.#logOptions = logOptions;
 
     this.#sessionUpdatedEvent = this.#getSessionUpdatedEvent();
     this.#transcriptionTransform = this.#getTranscriptionTransform();
@@ -247,9 +257,25 @@ export default class OpenAiStream implements AudioStream {
       this.#getAssistantTranscriptDeltaTransform();
 
     this.#setupEventListeners();
+    this.#logOperation("initialized", {
+      hasSocket: Boolean(socket),
+      loggingEnabled: Boolean(logOptions),
+    });
+  }
+
+  #log(area: string, message: string, extra?: object) {
+    this.#logOptions?.log(area, message, extra);
+  }
+
+  #logOperation(operation: string, extra?: object) {
+    this.#log("OpenAiStream", operation, extra);
   }
 
   read(signal?: AbortSignal): AsyncIterable<Buffer> {
+    this.#logOperation("read", {
+      via: this.#tts ? "tts" : "ulaw",
+      hasSignal: Boolean(signal),
+    });
     if (this.#tts) {
       return this.#tts.read(signal);
     }
@@ -257,33 +283,50 @@ export default class OpenAiStream implements AudioStream {
   }
 
   transform(): AsyncTransform<Buffer<ArrayBufferLike>> {
+    this.#logOperation("transform");
     return new AsyncTransform(this);
   }
 
   get format(): AudioFormat {
+    this.#logOperation("format", { useTtsFormat: Boolean(this.#tts?.format) });
     if (this.#tts?.format) return this.#tts.format;
     return new ULawFormat(8000);
   }
 
   get transcript(): AsyncReadStream<Transcript> {
+    this.#logOperation("transcript");
     return this.#transcriptionTransform;
   }
 
   get transcriptDelta(): AsyncReadStream<Transcript> {
+    this.#logOperation("transcriptDelta");
     return this.#assistantTranscriptDelta;
   }
 
   get ready(): Promise<void> {
+    this.#logOperation("ready", { hasTts: Boolean(this.#tts) });
     if (this.#tts) {
       return Promise.all([
         this.#sessionUpdatedEvent.then(),
         this.#tts.ready,
-      ]).then(() => {});
+      ]).then(() => {
+        this.#logOperation("ready.complete", { hasTts: true });
+      });
     }
-    return this.#sessionUpdatedEvent.then();
+    return this.#sessionUpdatedEvent.then((event) => {
+      this.#logOperation("ready.complete", {
+        hasTts: false,
+        hasEvent: Boolean(event),
+      });
+    });
   }
 
   async writeMessage(role: "user" | "system", text: string) {
+    this.#logOperation("writeMessage", {
+      role,
+      textLength: text.length,
+      ttsEnabled: Boolean(this.#tts),
+    });
     await this.#stream.write({
       type: "conversation.item.create",
       item: {
@@ -291,6 +334,10 @@ export default class OpenAiStream implements AudioStream {
         role,
         content: [{ type: "input_text", text }],
       },
+    });
+    this.#logOperation("writeMessage.conversationItemSent", {
+      role,
+      textLength: text.length,
     });
 
     const responseModalities: Array<"text" | "audio"> = this.#tts
@@ -301,58 +348,92 @@ export default class OpenAiStream implements AudioStream {
       type: "response.create",
       response: { modalities: responseModalities },
     });
+    this.#logOperation("writeMessage.responseCreateSent", {
+      responseModalities,
+    });
   }
 
   async write(input: Buffer<ArrayBufferLike>): Promise<void> {
+    this.#logOperation("write", { byteLength: input.byteLength });
     await this.#stream.write({
       type: "input_audio_buffer.append",
       audio: input.toString("base64"),
     });
+    this.#logOperation("write.complete");
   }
 
   async flush(): Promise<void> {
+    this.#logOperation("flush");
     await this.#stream.write({ type: "input_audio_buffer.commit" });
+    this.#logOperation("flush.complete");
   }
 
   async close(code?: number, reason?: string) {
+    this.#logOperation("close.request", {
+      code: code ?? 1000,
+      reason: reason ?? "normal closure",
+    });
     try {
       await this.#tts?.speak("");
-    } catch {}
+    } catch (error) {
+      this.#logOperation("close.ttsError", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     try {
       this.#socket?.close(code ?? 1000, reason ?? "normal closure");
-    } catch {}
+    } catch (error) {
+      this.#logOperation("close.socketError", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    this.#logOperation("close.complete");
   }
 
   async handleFunctionCalls(
     functionStream: FunctionStream,
     config?: AsyncTransformPipeConfig
   ) {
+    this.#logOperation("handleFunctionCalls.start");
     await Promise.all([
       functionStream.transform().pipe(this.#stream, config),
       this.#stream.transform().pipe(functionStream, config),
     ]);
+    this.#logOperation("handleFunctionCalls.complete");
   }
 
   async handleDtmf(dtmfStream: AsyncReadStream<string>, signal: AbortSignal) {
+    this.#logOperation("handleDtmf.start");
     await dtmfStream
       .transform()
-      .map((digit) => ({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "system",
-          content: [
-            {
-              type: "input_text",
-              text: `DTMF digit pressed by user: ${digit}`,
-            },
-          ],
-        },
-      }))
-      .pipe(this.#stream, { signal });
+      .map((digit) => {
+        this.#logOperation("handleDtmf.digit", { digit });
+        return {
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [
+              {
+                type: "input_text",
+                text: `DTMF digit pressed by user: ${digit}`,
+              },
+            ],
+          },
+        };
+      })
+      .pipe(this.#stream, { signal })
+      .catch((error) => {
+        this.#logOperation("handleDtmf.error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      });
+    this.#logOperation("handleDtmf.complete");
   }
 
   #setupEventListeners() {
+    this.#logOperation("setupEventListeners");
     void this.#transform
       .filter(isResponseCreated)
       .forEach((event) =>
@@ -388,7 +469,12 @@ export default class OpenAiStream implements AudioStream {
 
   #handleResponseCreated(event: Record<string, unknown>) {
     const responseId = getResponseIdFromData(event);
-    if (!responseId) return;
+    if (!responseId) {
+      this.#logOperation("handleResponseCreated.missingResponseId");
+      return;
+    }
+
+    this.#logOperation("handleResponseCreated", { responseId });
 
     this.#activeResponseIds.add(responseId);
     this.#canceledResponseIds.delete(responseId);
@@ -397,11 +483,20 @@ export default class OpenAiStream implements AudioStream {
 
   #handleResponseOutputItemDone(event: Record<string, unknown>) {
     const responseId = getResponseIdFromData(event);
-    if (!responseId) return;
+    if (!responseId) {
+      this.#logOperation("handleResponseOutputItemDone.missingResponseId");
+      return;
+    }
 
     const outputIndex = getOutputIndex(event);
     const key = this.#bufferKey(responseId, outputIndex);
     const bufferedText = this.#responseTextBuffer.get(key);
+
+    this.#logOperation("handleResponseOutputItemDone", {
+      responseId,
+      outputIndex,
+      hasBufferedText: Boolean(bufferedText),
+    });
 
     if (bufferedText && this.#tts) {
       this.#enqueueTtsSpeech(bufferedText);
@@ -413,64 +508,116 @@ export default class OpenAiStream implements AudioStream {
 
   #handleResponseTermination(event: Record<string, unknown>) {
     const responseId = getResponseIdFromData(event);
-    if (!responseId) return;
+    if (!responseId) {
+      this.#logOperation("handleResponseTermination.missingResponseId");
+      return;
+    }
+    this.#logOperation("handleResponseTermination", { responseId });
     this.#clearResponse(responseId);
   }
 
   #handleAssistantTextDeltaEvent(event: Record<string, unknown>) {
-    if (!this.#tts) return;
+    if (!this.#tts) {
+      this.#logOperation("handleAssistantTextDeltaEvent.noTts");
+      return;
+    }
 
     const delta = extractTextDelta(event);
-    if (typeof delta !== "string" || delta.length === 0) return;
+    if (typeof delta !== "string" || delta.length === 0) {
+      this.#logOperation("handleAssistantTextDeltaEvent.emptyDelta");
+      return;
+    }
 
     const responseId = getResponseIdFromData(event);
-    if (!responseId) return;
+    if (!responseId) {
+      this.#logOperation("handleAssistantTextDeltaEvent.missingResponseId");
+      return;
+    }
 
     const outputIndex = getOutputIndex(event);
     const key = this.#bufferKey(responseId, outputIndex);
     const previous = this.#responseTextBuffer.get(key) ?? "";
+    this.#logOperation("handleAssistantTextDeltaEvent", {
+      responseId,
+      outputIndex,
+      deltaLength: delta.length,
+    });
     this.#responseTextBuffer.set(key, previous + delta);
   }
 
   #handleSpeechStarted() {
+    this.#logOperation("handleSpeechStarted", {
+      activeResponses: this.#activeResponseIds.size,
+    });
     this.#userSpeaking = true;
     this.#cancelActiveResponses();
     this.#stopTtsPlayback();
   }
 
   #handleSpeechStopped() {
+    this.#logOperation("handleSpeechStopped", {
+      activeResponses: this.#activeResponseIds.size,
+    });
     this.#userSpeaking = false;
   }
 
   #cancelActiveResponses() {
+    this.#logOperation("cancelActiveResponses", {
+      activeResponses: Array.from(this.#activeResponseIds),
+    });
     for (const responseId of Array.from(this.#activeResponseIds)) {
       this.#cancelResponse(responseId);
     }
+    this.#logOperation("cancelActiveResponses.complete");
   }
 
   #cancelResponse(responseId: string) {
-    if (this.#canceledResponseIds.has(responseId)) return;
+    if (this.#canceledResponseIds.has(responseId)) {
+      this.#logOperation("cancelResponse.skip", { responseId });
+      return;
+    }
     this.#canceledResponseIds.add(responseId);
     this.#removeResponseBuffers(responseId);
 
+    this.#logOperation("cancelResponse.request", { responseId });
+
     void this.#stream
       .write({ type: "response.cancel", response_id: responseId })
-      .catch(() => {});
+      .then(() => {
+        this.#logOperation("cancelResponse.sent", { responseId });
+      })
+      .catch((error) => {
+        this.#logOperation("cancelResponse.error", {
+          responseId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
 
   #clearResponse(responseId: string) {
+    this.#logOperation("clearResponse", { responseId });
     this.#activeResponseIds.delete(responseId);
     this.#canceledResponseIds.delete(responseId);
     this.#removeResponseBuffers(responseId);
+    this.#logOperation("clearResponse.complete", {
+      responseId,
+      remainingActive: this.#activeResponseIds.size,
+    });
   }
 
   #removeResponseBuffers(responseId: string) {
     const prefix = `${responseId}:`;
+    const removedKeys: string[] = [];
     for (const key of Array.from(this.#responseTextBuffer.keys())) {
       if (key.startsWith(prefix)) {
         this.#responseTextBuffer.delete(key);
+        removedKeys.push(key);
       }
     }
+    this.#logOperation("removeResponseBuffers", {
+      responseId,
+      removedKeys,
+    });
   }
 
   #bufferKey(responseId: string, outputIndex: number) {
@@ -481,33 +628,60 @@ export default class OpenAiStream implements AudioStream {
     operation: (tts: TextToSpeachModel) => Promise<void> | void
   ) {
     const tts = this.#tts;
-    if (!tts) return;
+    if (!tts) {
+      this.#logOperation("enqueueTtsOperation.noTts");
+      return;
+    }
+
+    this.#logOperation("enqueueTtsOperation.queue");
 
     this.#ttsSpeakQueue = this.#ttsSpeakQueue
       .then(async () => {
         if (!this.#tts || this.#tts !== tts) {
+          this.#logOperation("enqueueTtsOperation.skipped");
           return;
         }
+        this.#logOperation("enqueueTtsOperation.execute");
         await operation(tts);
+        this.#logOperation("enqueueTtsOperation.done");
       })
-      .catch(() => {});
+      .catch((error) => {
+        this.#logOperation("enqueueTtsOperation.error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
 
   #enqueueTtsSpeech(text: string) {
-    if (this.#userSpeaking) return;
+    if (this.#userSpeaking) {
+      this.#logOperation("enqueueTtsSpeech.skippedUserSpeaking");
+      return;
+    }
 
     const tts = this.#tts;
-    if (!tts) return;
+    if (!tts) {
+      this.#logOperation("enqueueTtsSpeech.noTts");
+      return;
+    }
 
     const normalized = normalizeWhitespace(text);
-    if (!normalized) return;
+    if (!normalized) {
+      this.#logOperation("enqueueTtsSpeech.empty");
+      return;
+    }
 
+    this.#logOperation("enqueueTtsSpeech", { textLength: normalized.length });
     this.#enqueueTtsOperation((model) => model.speak(normalized));
   }
 
   #stopTtsPlayback() {
     const tts = this.#tts;
-    if (!tts) return;
+    if (!tts) {
+      this.#logOperation("stopTtsPlayback.noTts");
+      return;
+    }
+
+    this.#logOperation("stopTtsPlayback");
 
     for (const responseId of Array.from(this.#activeResponseIds)) {
       this.#removeResponseBuffers(responseId);
@@ -522,11 +696,14 @@ export default class OpenAiStream implements AudioStream {
 
       if (typeof maybeStop === "function") {
         await maybeStop.call(model);
+        this.#logOperation("stopTtsPlayback.stopCalled");
         return;
       }
 
       await model.speak("");
+      this.#logOperation("stopTtsPlayback.fallbackSpeak");
     });
+    this.#logOperation("stopTtsPlayback.queued");
   }
 
   async update(
@@ -534,10 +711,18 @@ export default class OpenAiStream implements AudioStream {
     tools: JsonValue,
     externalVoiceModel?: TextToSpeachModel
   ) {
+    this.#logOperation("update.start", {
+      voice: update.voice,
+      model: update.model,
+      useExternalVoiceModel: Boolean(externalVoiceModel),
+      temperature: update.temperature ?? 0.8,
+      hasFunctions: Boolean(update.functions?.length),
+    });
     assert(
       externalVoiceModel || update.voice,
       "Must provide at least one: `update.voice` or `externalVoiceModel`"
     );
+    const useExternalVoice = Boolean(externalVoiceModel);
 
     const session: {
       tools: JsonValue;
@@ -577,42 +762,69 @@ export default class OpenAiStream implements AudioStream {
       temperature: update.temperature ?? 0.8,
     };
 
-    if (externalVoiceModel) {
+    if (useExternalVoice) {
       session.voice = undefined;
       session.modalities = ["text"];
       session.output_audio_format = undefined;
     }
 
+    this.#logOperation("update.writeSession", {
+      useExternalVoice,
+      modalities: session.modalities,
+    });
     await this.#stream.write({
       type: "session.update",
       session,
     } as unknown as JsonValue);
 
-    if (externalVoiceModel) {
+    if (useExternalVoice && externalVoiceModel) {
+      this.#logOperation("update.externalVoiceModel", {
+        modelReady: Boolean(externalVoiceModel.ready),
+      });
       this.#responseTextBuffer.clear();
       this.#ttsSpeakQueue = Promise.resolve();
       this.#tts = externalVoiceModel;
       await this.#tts.ready;
+      this.#logOperation("update.externalVoiceModel.ready");
     } else {
+      this.#logOperation("update.internalVoice");
       this.#tts = undefined;
       this.#responseTextBuffer.clear();
       this.#ttsSpeakQueue = Promise.resolve();
     }
+    this.#logOperation("update.complete", {
+      hasExternalTts: Boolean(this.#tts),
+      bufferedResponses: this.#responseTextBuffer.size,
+    });
   }
 
-  static async from(websocket: WebSocket) {
-    return new OpenAiStream(
-      await getWebsocketStream(websocket, JsonEncoding, { clear: "all-read" }),
-      websocket
-    );
+  static async from(websocket: WebSocket, logOptions?: ILogOptions) {
+    logOptions?.log("OpenAiStream", "from.start", {
+      readyState: websocket.readyState,
+    });
+    const stream = await getWebsocketStream(websocket, JsonEncoding, {
+      clear: "all-read",
+    });
+    const instance = new OpenAiStream(stream, websocket, logOptions);
+    logOptions?.log("OpenAiStream", "from.complete", {
+      readyState: websocket.readyState,
+    });
+    return instance;
   }
 
   static async create(
     secretKey: string,
     config: OpenAiSessionConfig,
     tools: FunctionTool[],
-    externalVoiceModel?: TextToSpeachModel
+    externalVoiceModel?: TextToSpeachModel,
+    logOptions?: ILogOptions
   ) {
+    logOptions?.log("OpenAiStream", "create.start", {
+      model: config.model,
+      hasTools: Boolean(tools?.length),
+      hasExternalVoiceModel: Boolean(externalVoiceModel),
+    });
+
     const socket = new WebSocket(getOpenAiUrl(config.model), {
       headers: {
         Authorization: `Bearer ${secretKey}`,
@@ -620,12 +832,15 @@ export default class OpenAiStream implements AudioStream {
       },
     });
 
-    const stream = await OpenAiStream.from(socket);
+    const stream = await OpenAiStream.from(socket, logOptions);
     await stream.update(
       config,
       tools as unknown as JsonValue,
       externalVoiceModel
     );
+    logOptions?.log("OpenAiStream", "create.complete", {
+      socketReadyState: socket.readyState,
+    });
     return { stream, socket };
   }
 
@@ -638,11 +853,16 @@ export default class OpenAiStream implements AudioStream {
       assertType(data, "object", "data");
       assertHasProperty(data, "delta", "data");
       assertType(data.delta, "string", "data.delta");
-      return Buffer.from(data.delta, "base64");
+      const buffer = Buffer.from(data.delta, "base64");
+      this.#logOperation("ulawTransform.chunk", {
+        byteLength: buffer.byteLength,
+      });
+      return buffer;
     });
   }
 
   async #getSessionUpdatedEvent() {
+    this.#logOperation("getSessionUpdatedEvent.await");
     const updatedEvent = await this.#transform.first(
       (data) =>
         typeof data === "object" &&
@@ -650,10 +870,14 @@ export default class OpenAiStream implements AudioStream {
         "type" in data &&
         data.type === "session.updated"
     );
+    this.#logOperation("getSessionUpdatedEvent.resolved", {
+      hasEvent: Boolean(updatedEvent),
+    });
     return updatedEvent;
   }
 
   #getTranscriptionTransform(): AsyncTransform<Transcript> {
+    this.#logOperation("getTranscriptionTransform.create");
     return this.#transform
       .filter(
         (data) =>
@@ -669,6 +893,9 @@ export default class OpenAiStream implements AudioStream {
         if (isAssistantTranscriptDone(data)) {
           assertHasProperty(data, "transcript", "data");
           assertType(data.transcript, "string", "data.transcript");
+          this.#logOperation("transcript.assistantDone", {
+            length: data.transcript.length,
+          });
           return {
             source: "agent",
             content: data.transcript,
@@ -678,6 +905,9 @@ export default class OpenAiStream implements AudioStream {
         if (isUserTranscriptCompleted(data)) {
           assertHasProperty(data, "transcript", "data");
           assertType(data.transcript, "string", "data.transcript");
+          this.#logOperation("transcript.userCompleted", {
+            length: data.transcript.length,
+          });
           return {
             source: "user",
             content: data.transcript,
@@ -687,6 +917,9 @@ export default class OpenAiStream implements AudioStream {
         if (isAssistantTextDone(data)) {
           const transcript = extractTextDelta(data);
           if (typeof transcript === "string" && transcript.length > 0) {
+            this.#logOperation("transcript.assistantTextDone", {
+              length: transcript.length,
+            });
             return { source: "agent", content: transcript } as Transcript;
           }
         }
@@ -696,6 +929,9 @@ export default class OpenAiStream implements AudioStream {
           const item = responseData.item;
           const transcript = extractTextFromResponseItem(item);
           if (typeof transcript === "string" && transcript.length > 0) {
+            this.#logOperation("transcript.responseOutputItemDone", {
+              length: transcript.length,
+            });
             return { source: "agent", content: transcript } as Transcript;
           }
         }
@@ -705,6 +941,7 @@ export default class OpenAiStream implements AudioStream {
   }
 
   #getAssistantTranscriptDeltaTransform(): AsyncTransform<Transcript> {
+    this.#logOperation("getAssistantTranscriptDeltaTransform.create");
     return this.#transform
       .filter(
         (data) => isAssistantTranscriptDelta(data) || isAssistantTextDelta(data)
@@ -715,11 +952,17 @@ export default class OpenAiStream implements AudioStream {
         if (isAssistantTranscriptDelta(data)) {
           assertHasProperty(data, "delta", "data");
           assertType(data.delta, "string", "data.delta");
+          this.#logOperation("transcriptDelta.assistantTranscript", {
+            length: data.delta.length,
+          });
           return { source: "agent", content: data.delta } as Transcript;
         }
 
         const delta = extractTextDelta(data);
         assertType(delta ?? "", "string", "assistant text delta");
+        this.#logOperation("transcriptDelta.assistantText", {
+          length: delta?.length ?? 0,
+        });
         return { source: "agent", content: delta ?? "" } as Transcript;
       });
   }
