@@ -827,7 +827,7 @@ export default class OpenAiStream implements AudioStream {
         interrupt_response: boolean;
       };
       input_audio_format: string;
-      output_audio_format: string | null;
+      output_audio_format?: string;
       voice?: OpenAiVoice;
       instructions: string;
       modalities: Array<"text" | "audio">;
@@ -846,13 +846,13 @@ export default class OpenAiStream implements AudioStream {
         interrupt_response: true,
       },
       input_audio_format: "g711_ulaw",
-      output_audio_format: useExternalVoice ? null : "g711_ulaw",
       instructions: update.instructions,
       modalities: useExternalVoice ? ["text"] : ["text", "audio"],
       temperature: update.temperature ?? 0.8,
     };
 
     if (!useExternalVoice) {
+      session.output_audio_format = "g711_ulaw";
       session.voice = update.voice!;
     }
 
