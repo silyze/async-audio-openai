@@ -224,7 +224,10 @@ function extractTextDelta(data: unknown): string | undefined {
 function isWebSocketClosedError(error: unknown): boolean {
   if (error instanceof Error) {
     if (error.message.includes("WebSocket is not open")) return true;
-    if ("code" in error && (error as { code?: unknown }).code === "ERR_WS_NOT_OPEN") {
+    if (
+      "code" in error &&
+      (error as { code?: unknown }).code === "ERR_WS_NOT_OPEN"
+    ) {
       return true;
     }
   }
@@ -707,7 +710,8 @@ export default class OpenAiStream implements AudioStream {
     this.#logOperation("shutdownTts.start", { reason });
 
     this.#enqueueTtsOperation(async (model) => {
-      const closable = (model as unknown as { close?: () => Promise<void> }).close;
+      const closable = (model as unknown as { close?: () => Promise<void> })
+        .close;
       if (typeof closable === "function") {
         await closable.call(model);
         this.#logOperation("shutdownTts.closeCalled", { reason });
@@ -823,8 +827,8 @@ export default class OpenAiStream implements AudioStream {
         interrupt_response: boolean;
       };
       input_audio_format: string;
-      output_audio_format?: string;
-      voice?: OpenAiVoice;
+      output_audio_format: string | null;
+      voice: OpenAiVoice | null;
       instructions: string;
       modalities: Array<"text" | "audio">;
       temperature: number;
@@ -843,16 +847,16 @@ export default class OpenAiStream implements AudioStream {
       },
       input_audio_format: "g711_ulaw",
       output_audio_format: "g711_ulaw",
-      voice: update.voice,
+      voice: update.voice ?? null,
       instructions: update.instructions,
       modalities: ["text", "audio"],
       temperature: update.temperature ?? 0.8,
     };
 
     if (useExternalVoice) {
-      session.voice = undefined;
+      session.voice = null;
       session.modalities = ["text"];
-      session.output_audio_format = undefined;
+      session.output_audio_format = null;
     }
 
     this.#logOperation("update.writeSession", {
