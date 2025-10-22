@@ -221,6 +221,24 @@ function extractTextDelta(data: unknown): string | undefined {
   return undefined;
 }
 
+function isWebSocketClosedError(error: unknown): boolean {
+  if (error instanceof Error) {
+    if (error.message.includes("WebSocket is not open")) return true;
+    if ("code" in error && (error as { code?: unknown }).code === "ERR_WS_NOT_OPEN") {
+      return true;
+    }
+  }
+  if (error == null) return false;
+  const message = String(error);
+  return message.includes("WebSocket is not open");
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 export default class OpenAiStream implements AudioStream {
   #transform: AsyncTransform<JsonValue>;
   #stream: AsyncStream<JsonValue>;
@@ -373,13 +391,11 @@ export default class OpenAiStream implements AudioStream {
       code: code ?? 1000,
       reason: reason ?? "normal closure",
     });
-    try {
-      await this.#tts?.speak("");
-    } catch (error) {
-      this.#logOperation("close.ttsError", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+
+    await this.#shutdownCurrentTts("close");
+    this.#tts = undefined;
+    this.#responseTextBuffer.clear();
+
     try {
       this.#socket?.close(code ?? 1000, reason ?? "normal closure");
     } catch (error) {
@@ -641,15 +657,78 @@ export default class OpenAiStream implements AudioStream {
           this.#logOperation("enqueueTtsOperation.skipped");
           return;
         }
-        this.#logOperation("enqueueTtsOperation.execute");
-        await operation(tts);
-        this.#logOperation("enqueueTtsOperation.done");
+
+        let attempt = 0;
+        let lastError: unknown;
+        while (attempt < 2) {
+          try {
+            await tts.ready;
+            this.#logOperation("enqueueTtsOperation.execute", {
+              attempt: attempt + 1,
+            });
+            await operation(tts);
+            this.#logOperation("enqueueTtsOperation.done", {
+              attempt: attempt + 1,
+            });
+            return;
+          } catch (error) {
+            lastError = error;
+            const retryable = isWebSocketClosedError(error) && attempt === 0;
+            if (!retryable) {
+              throw error;
+            }
+            attempt += 1;
+            this.#logOperation("enqueueTtsOperation.retry", {
+              attempt,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            await delay(50);
+          }
+        }
+
+        throw lastError instanceof Error
+          ? lastError
+          : new Error(String(lastError ?? "Unknown TTS error"));
       })
       .catch((error) => {
         this.#logOperation("enqueueTtsOperation.error", {
           error: error instanceof Error ? error.message : String(error),
         });
       });
+  }
+
+  async #shutdownCurrentTts(reason: string) {
+    const tts = this.#tts;
+    if (!tts) {
+      this.#logOperation("shutdownTts.skipped", { reason });
+      return;
+    }
+
+    this.#logOperation("shutdownTts.start", { reason });
+
+    this.#enqueueTtsOperation(async (model) => {
+      const closable = (model as unknown as { close?: () => Promise<void> }).close;
+      if (typeof closable === "function") {
+        await closable.call(model);
+        this.#logOperation("shutdownTts.closeCalled", { reason });
+        return;
+      }
+
+      await model.speak("");
+      this.#logOperation("shutdownTts.fallbackSpeak", { reason });
+    });
+
+    try {
+      await this.#ttsSpeakQueue;
+      this.#logOperation("shutdownTts.complete", { reason });
+    } catch (error) {
+      this.#logOperation("shutdownTts.queueError", {
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.#ttsSpeakQueue = Promise.resolve();
+    }
   }
 
   #enqueueTtsSpeech(text: string) {
@@ -724,6 +803,14 @@ export default class OpenAiStream implements AudioStream {
     );
     const useExternalVoice = Boolean(externalVoiceModel);
 
+    const previousTts = this.#tts;
+    if (previousTts && previousTts !== externalVoiceModel) {
+      await this.#shutdownCurrentTts("update");
+      if (this.#tts === previousTts) {
+        this.#tts = undefined;
+      }
+    }
+
     const session: {
       tools: JsonValue;
       input_audio_transcription: { model: string };
@@ -782,7 +869,6 @@ export default class OpenAiStream implements AudioStream {
         modelReady: Boolean(externalVoiceModel.ready),
       });
       this.#responseTextBuffer.clear();
-      this.#ttsSpeakQueue = Promise.resolve();
       this.#tts = externalVoiceModel;
       await this.#tts.ready;
       this.#logOperation("update.externalVoiceModel.ready");
@@ -790,7 +876,6 @@ export default class OpenAiStream implements AudioStream {
       this.#logOperation("update.internalVoice");
       this.#tts = undefined;
       this.#responseTextBuffer.clear();
-      this.#ttsSpeakQueue = Promise.resolve();
     }
     this.#logOperation("update.complete", {
       hasExternalTts: Boolean(this.#tts),
