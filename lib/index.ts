@@ -570,7 +570,7 @@ export default class OpenAiStream implements AudioStream {
     });
     this.#userSpeaking = true;
     this.#cancelActiveResponses();
-    this.#stopTtsPlayback(true);
+    this.#stopTtsPlayback();
   }
 
   #handleSpeechStopped() {
@@ -757,20 +757,20 @@ export default class OpenAiStream implements AudioStream {
     this.#enqueueTtsOperation((model) => model.speak(normalized));
   }
 
-  #stopTtsPlayback(interruptQueue = false) {
+  #stopTtsPlayback() {
     const tts = this.#tts;
     if (!tts) {
       this.#logOperation("stopTtsPlayback.noTts");
       return;
     }
 
-    this.#logOperation("stopTtsPlayback", { interruptQueue });
+    this.#logOperation("stopTtsPlayback");
 
     for (const responseId of Array.from(this.#activeResponseIds)) {
       this.#removeResponseBuffers(responseId);
     }
 
-    const stopOperation = async (model: TextToSpeachModel) => {
+    this.#enqueueTtsOperation(async (model) => {
       const maybeStop = (
         model as {
           stop?: () => Promise<void> | void;
@@ -785,21 +785,8 @@ export default class OpenAiStream implements AudioStream {
 
       await model.speak("");
       this.#logOperation("stopTtsPlayback.fallbackSpeak");
-    };
-
-    if (interruptQueue) {
-      // Drop any queued speech and stop immediately so we do not talk over the user.
-      this.#ttsSpeakQueue = Promise.resolve();
-      void stopOperation(tts).catch((error) => {
-        this.#logOperation("stopTtsPlayback.immediateError", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-      return;
-    }
-
-    this.#enqueueTtsOperation(stopOperation);
-    this.#logOperation("stopTtsPlayback.queued", { interruptQueue });
+    });
+    this.#logOperation("stopTtsPlayback.queued");
   }
 
   async update(
@@ -852,11 +839,11 @@ export default class OpenAiStream implements AudioStream {
       },
       turn_detection: {
         type: "server_vad",
-        threshold: 0.25,
-        silence_duration_ms: 700,
-        prefix_padding_ms: 300,
-        interrupt_response: true,
+        threshold: 0.5,
+        silence_duration_ms: 600,
+        prefix_padding_ms: 400,
         create_response: true,
+        interrupt_response: true,
       },
       input_audio_format: "g711_ulaw",
       instructions: update.instructions,
