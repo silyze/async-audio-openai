@@ -49,6 +49,7 @@ export interface ILogOptions {
 }
 
 const OPENAI_WS_URL = `wss://api.openai.com/v1/realtime`;
+const DEFAULT_TEMPERATURE = 0.2;
 function getOpenAiUrl(model?: string) {
   const url = new URL(OPENAI_WS_URL);
   if (model) url.searchParams.set("model", model);
@@ -811,7 +812,7 @@ export default class OpenAiStream implements AudioStream {
       voice: update.voice,
       model: update.model,
       useExternalVoiceModel: Boolean(externalVoiceModel),
-      temperature: update.temperature ?? 0.8,
+      temperature: update.temperature ?? DEFAULT_TEMPERATURE,
       hasFunctions: Boolean(update.functions?.length),
     });
     assert(
@@ -861,7 +862,7 @@ export default class OpenAiStream implements AudioStream {
       input_audio_format: "g711_ulaw",
       instructions: update.instructions,
       modalities: useExternalVoice ? ["text"] : ["text", "audio"],
-      temperature: update.temperature ?? 0.8,
+      temperature: update.temperature ?? DEFAULT_TEMPERATURE,
     };
 
     if (!useExternalVoice) {

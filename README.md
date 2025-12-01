@@ -185,7 +185,7 @@ interface OpenAiSessionConfig {
   voice?: OpenAiVoice; // Built-in OpenAI voice (omit when using external TTS)
   instructions: string; // System prompt
   model: string; // e.g. "gpt-4o-audio-preview"
-  temperature?: number; // default 0.8
+  temperature?: number; // default 0.2
   transcriptionModel?: string; // default "whisper-1"
   functions?: FunctionTool[]; // OpenAI function-call tools
 }
