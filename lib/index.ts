@@ -41,6 +41,7 @@ export type OpenAiSessionConfig = {
   model: string;
   temperature?: number;
   transcriptionModel?: string;
+  transcriptionLanguage?: string;
   functions?: FunctionTool[];
 };
 
@@ -364,11 +365,11 @@ export default class OpenAiStream implements AudioStream {
 
     const responseModalities: Array<"text" | "audio"> = this.#tts
       ? ["text"]
-      : ["text", "audio"];
+      : ["audio"];
 
     await this.#stream.write({
       type: "response.create",
-      response: { modalities: responseModalities },
+      response: { output_modalities: responseModalities },
     });
     this.#logOperation("writeMessage.responseCreateSent", {
       responseModalities,
@@ -829,50 +830,59 @@ export default class OpenAiStream implements AudioStream {
       }
     }
 
+    const turnDetection = {
+      type: "server_vad" as const,
+      threshold: 0.25,
+      silence_duration_ms: 700,
+      prefix_padding_ms: 300,
+      interrupt_response: true,
+      create_response: true,
+    };
     const session: {
       tools: JsonValue;
-      input_audio_transcription: { model: string };
-      turn_detection: {
-        type: "server_vad";
-        threshold: number;
-        silence_duration_ms: number;
-        prefix_padding_ms: number;
-        create_response: boolean;
-        interrupt_response: boolean;
+      audio: {
+        input: {
+          format: { type: "audio/pcmu" };
+          transcription: { model: string; language?: string };
+          turn_detection: typeof turnDetection;
+        };
+        output?: {
+          format: { type: "audio/pcmu" };
+          voice: OpenAiVoice;
+        };
       };
-      input_audio_format: string;
-      output_audio_format?: string;
-      voice?: OpenAiVoice;
       instructions: string;
-      modalities: Array<"text" | "audio">;
+      output_modalities: Array<"text" | "audio">;
       temperature: number;
     } = {
       tools,
-      input_audio_transcription: {
-        model: update.transcriptionModel ?? "whisper-1",
+      audio: {
+        input: {
+          format: { type: "audio/pcmu" },
+          transcription: {
+            model: update.transcriptionModel ?? "whisper-1",
+            ...(update.transcriptionLanguage
+              ? { language: update.transcriptionLanguage }
+              : {}),
+          },
+          turn_detection: turnDetection,
+        },
       },
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.25,
-        silence_duration_ms: 700,
-        prefix_padding_ms: 300,
-        interrupt_response: true,
-        create_response: true,
-      },
-      input_audio_format: "g711_ulaw",
       instructions: update.instructions,
-      modalities: useExternalVoice ? ["text"] : ["text", "audio"],
+      output_modalities: useExternalVoice ? ["text"] : ["audio"],
       temperature: update.temperature ?? DEFAULT_TEMPERATURE,
     };
 
     if (!useExternalVoice) {
-      session.output_audio_format = "g711_ulaw";
-      session.voice = update.voice!;
+      session.audio.output = {
+        format: { type: "audio/pcmu" },
+        voice: update.voice!,
+      };
     }
 
     this.#logOperation("update.writeSession", {
       useExternalVoice,
-      modalities: session.modalities,
+      outputModalities: session.output_modalities,
     });
     await this.#stream.write({
       type: "session.update",
