@@ -952,7 +952,6 @@ export default class OpenAiStream implements AudioStream {
     const socket = new WebSocket(getOpenAiUrl(config.model), {
       headers: {
         Authorization: `Bearer ${secretKey}`,
-        "OpenAI-Beta": "realtime=v1",
       },
     });
 
