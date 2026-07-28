@@ -373,12 +373,25 @@ export default class OpenAiStream implements AudioStream {
       ? ["text"]
       : ["audio"];
 
+    const response: Record<string, unknown> = {
+      output_modalities: responseModalities,
+    };
+
+    if (!this.#tts) {
+      response.audio = {
+        output: {
+          format: { type: "audio/pcmu" },
+        },
+      };
+    }
+
     await this.#stream.write({
       type: "response.create",
-      response: { output_modalities: responseModalities },
-    });
+      response,
+    } as unknown as JsonValue);
     this.#logOperation("writeMessage.responseCreateSent", {
       responseModalities,
+      response,
     });
   }
 
