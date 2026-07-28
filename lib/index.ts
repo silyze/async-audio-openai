@@ -139,6 +139,12 @@ const isResponseFailed = (data: unknown) =>
   "type" in data &&
   (data.type === "response.failed" || data.type === "response.error");
 
+const isErrorEvent = (data: unknown) =>
+  typeof data === "object" &&
+  data !== null &&
+  "type" in data &&
+  data.type === "error";
+
 const isInputSpeechStarted = (data: unknown) =>
   typeof data === "object" &&
   data !== null &&
@@ -471,6 +477,12 @@ export default class OpenAiStream implements AudioStream {
       .filter((event) => isResponseCanceled(event) || isResponseFailed(event))
       .forEach((event) =>
         this.#handleResponseTermination(event as Record<string, unknown>)
+      );
+
+    void this.#transform
+      .filter(isErrorEvent)
+      .forEach((event) =>
+        this.#logOperation("server.error", event as Record<string, unknown>)
       );
 
     void this.#transform
@@ -839,6 +851,7 @@ export default class OpenAiStream implements AudioStream {
       create_response: true,
     };
     const session: {
+      type: "realtime";
       tools: JsonValue;
       audio: {
         input: {
@@ -855,6 +868,7 @@ export default class OpenAiStream implements AudioStream {
       output_modalities: Array<"text" | "audio">;
       temperature: number;
     } = {
+      type: "realtime",
       tools,
       audio: {
         input: {
@@ -940,6 +954,28 @@ export default class OpenAiStream implements AudioStream {
         Authorization: `Bearer ${secretKey}`,
         "OpenAI-Beta": "realtime=v1",
       },
+    });
+
+    socket.on("close", (code, reason) => {
+      logOptions?.log("OpenAiStream", "socket.close", {
+        code,
+        reason: reason.toString(),
+        readyState: socket.readyState,
+      });
+    });
+
+    socket.on("error", (error) => {
+      logOptions?.log("OpenAiStream", "socket.error", {
+        error: error instanceof Error ? error.message : String(error),
+        readyState: socket.readyState,
+      });
+    });
+
+    socket.on("unexpected-response", (_request, response) => {
+      logOptions?.log("OpenAiStream", "socket.unexpectedResponse", {
+        statusCode: response.statusCode,
+        statusMessage: response.statusMessage,
+      });
     });
 
     const stream = await OpenAiStream.from(socket, logOptions);
